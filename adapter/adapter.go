@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/common/queue"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/xsync"
@@ -321,4 +322,107 @@ func urlToMetadata(rawURL string) (addr C.Metadata, err error) {
 
 	err = addr.SetRemoteAddress(net.JoinHostPort(u.Hostname(), port))
 	return
+}
+
+func (p *Proxy) StatusTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (status uint16, ok bool, err error) {
+	addr, err := urlToMetadata(url)
+	if err != nil {
+		return 0, false, err
+	}
+
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return p.DialContext(ctx, &addr)
+		},
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       ca.GetGlobalTLSConfig(&tls.Config{}),
+	}
+
+	client := http.Client{
+		Timeout:   20 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	req, err := http.NewRequest(http.MethodHead, url, nil)
+	if err != nil {
+		return 0, false, err
+	}
+	req = req.WithContext(ctx)
+	req.Header.Set("User-Agent", convert.RandUserAgent())
+	req.Header.Set("Accept", "application/json, text/html, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+
+	var headStatusCode int
+	resp, err := client.Do(req)
+	if err != nil {
+		if netErr, okTimeout := err.(net.Error); okTimeout && netErr.Timeout() {
+			headStatusCode = 599
+		} else {
+			return 0, false, err
+		}
+	} else {
+		headStatusCode = resp.StatusCode
+	}
+
+	banHeadStatus := map[int]bool{
+		http.StatusForbidden:        true, // 403
+		520:                         true, // Cloudflare 520
+		http.StatusMethodNotAllowed: true, // 405
+		http.StatusNotImplemented:   true, // 501
+		599:                         true, // 超时
+	}
+
+	if banHeadStatus[headStatusCode] {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		getReq, err2 := http.NewRequest(http.MethodGet, url, nil)
+		if err2 != nil {
+			return uint16(headStatusCode), false, nil
+		}
+		getReq = getReq.WithContext(ctx)
+		getReq.Header = req.Header.Clone()
+
+		getResp, getErr := client.Do(getReq)
+		var getStatusCode int
+		if getErr != nil || getResp == nil {
+			if netErr, okTimeout := getErr.(net.Error); okTimeout && netErr.Timeout() {
+				getStatusCode = 599
+			} else {
+				return uint16(headStatusCode), false, nil
+			}
+		} else {
+			getStatusCode = getResp.StatusCode
+			defer getResp.Body.Close()
+		}
+
+		if headStatusCode == getStatusCode {
+			status = uint16(headStatusCode)
+			ok = expectedStatus == nil || expectedStatus.Check(status)
+			if banHeadStatus[int(status)] {
+				ok = false
+			}
+			return status, ok, nil
+		} else {
+			return uint16(getStatusCode), false, nil
+		}
+	}
+
+	if resp != nil {
+		defer resp.Body.Close()
+		status = uint16(resp.StatusCode)
+		ok = expectedStatus == nil || expectedStatus.Check(status)
+		return status, ok, nil
+	}
+
+	return 0, false, fmt.Errorf("unknown error in StatusTest")
 }

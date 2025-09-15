@@ -22,6 +22,7 @@ import (
 	"github.com/metacubex/mihomo/component/geodata"
 	P "github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
@@ -65,6 +66,9 @@ type General struct {
 	KeepAliveIdle           int               `json:"keep-alive-idle"`
 	KeepAliveInterval       int               `json:"keep-alive-interval"`
 	DisableKeepAlive        bool              `json:"disable-keep-alive"`
+	LgbmAutoUpdate          bool              `json:"lgbm-auto-update"`
+	LgbmUpdateInterval      int               `json:"lgbm-update-interval"`
+	LgbmUrl                 string            `json:"lgbm-url"`
 }
 
 // Inbound config
@@ -167,8 +171,9 @@ type DNS struct {
 
 // Profile config
 type Profile struct {
-	StoreSelected bool
-	StoreFakeIP   bool
+	StoreSelected      bool
+	StoreFakeIP        bool
+	SmartCollectorSize float64
 }
 
 // TLS config
@@ -335,8 +340,9 @@ type RawExperimental struct {
 }
 
 type RawProfile struct {
-	StoreSelected bool `yaml:"store-selected" json:"store-selected"`
-	StoreFakeIP   bool `yaml:"store-fake-ip" json:"store-fake-ip"`
+	StoreSelected      bool    `yaml:"store-selected" json:"store-selected"`
+	StoreFakeIP        bool    `yaml:"store-fake-ip" json:"store-fake-ip"`
+	SmartCollectorSize float64 `yaml:"smart-collector-size" json:"smart-collector-size"`
 }
 
 type RawGeoXUrl struct {
@@ -419,6 +425,9 @@ type RawConfig struct {
 	KeepAliveIdle           int               `yaml:"keep-alive-idle" json:"keep-alive-idle"`
 	KeepAliveInterval       int               `yaml:"keep-alive-interval" json:"keep-alive-interval"`
 	DisableKeepAlive        bool              `yaml:"disable-keep-alive" json:"disable-keep-alive"`
+	LgbmAutoUpdate          bool              `yaml:"lgbm-auto-update" json:"lgbm-auto-update"`
+	LgbmUpdateInterval      int               `yaml:"lgbm-update-interval" json:"lgbm-update-interval"`
+	LgbmUrl                 string            `yaml:"lgbm-url" json:"lgbm-url"`
 
 	ProxyProvider map[string]map[string]any `yaml:"proxy-providers" json:"proxy-providers"`
 	RuleProvider  map[string]map[string]any `yaml:"rule-providers" json:"rule-providers"`
@@ -454,26 +463,29 @@ func Parse(buf []byte) (*Config, error) {
 
 func DefaultRawConfig() *RawConfig {
 	return &RawConfig{
-		AllowLan:          false,
-		BindAddress:       "*",
-		LanAllowedIPs:     []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
-		IPv6:              true,
-		Mode:              T.Rule,
-		GeoAutoUpdate:     false,
-		GeoUpdateInterval: 24,
-		GeodataMode:       geodata.GeodataMode(),
-		GeodataLoader:     "memconservative",
-		UnifiedDelay:      false,
-		Authentication:    []string{},
-		LogLevel:          log.INFO,
-		Hosts:             map[string]any{},
-		Rule:              []string{},
-		Proxy:             []map[string]any{},
-		ProxyGroup:        []map[string]any{},
-		TCPConcurrent:     false,
-		FindProcessMode:   P.FindProcessStrict,
-		GlobalUA:          "clash.meta/" + C.Version,
-		ETagSupport:       true,
+		AllowLan:           false,
+		BindAddress:        "*",
+		LanAllowedIPs:      []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")},
+		IPv6:               true,
+		Mode:               T.Rule,
+		GeoAutoUpdate:      false,
+		GeoUpdateInterval:  24,
+		LgbmAutoUpdate:     false,
+		LgbmUpdateInterval: 72,
+		LgbmUrl:            lightgbm.GetModelDownloadURL(),
+		GeodataMode:        geodata.GeodataMode(),
+		GeodataLoader:      "memconservative",
+		UnifiedDelay:       false,
+		Authentication:     []string{},
+		LogLevel:           log.INFO,
+		Hosts:              map[string]any{},
+		Rule:               []string{},
+		Proxy:              []map[string]any{},
+		ProxyGroup:         []map[string]any{},
+		TCPConcurrent:      false,
+		FindProcessMode:    P.FindProcessStrict,
+		GlobalUA:           "clash.meta/" + C.Version,
+		ETagSupport:        true,
 		DNS: RawDNS{
 			Enable:         false,
 			IPv6:           false,
@@ -548,7 +560,8 @@ func DefaultRawConfig() *RawConfig {
 			QUICGoDisableECN: true,
 		},
 		Profile: RawProfile{
-			StoreSelected: true,
+			StoreSelected:      true,
+			SmartCollectorSize: 100,
 		},
 		GeoXUrl: RawGeoXUrl{
 			Mmdb:    "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
@@ -762,6 +775,9 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 		KeepAliveIdle:           cfg.KeepAliveIdle,
 		KeepAliveInterval:       cfg.KeepAliveInterval,
 		DisableKeepAlive:        cfg.DisableKeepAlive,
+		LgbmAutoUpdate:          cfg.LgbmAutoUpdate,
+		LgbmUpdateInterval:      cfg.LgbmUpdateInterval,
+		LgbmUrl:                 cfg.LgbmUrl,
 	}, nil
 }
 
@@ -820,8 +836,9 @@ func parseNTP(cfg *RawConfig) (*NTP, error) {
 
 func parseProfile(cfg *RawConfig) (*Profile, error) {
 	return &Profile{
-		StoreSelected: cfg.Profile.StoreSelected,
-		StoreFakeIP:   cfg.Profile.StoreFakeIP,
+		StoreSelected:      cfg.Profile.StoreSelected,
+		StoreFakeIP:        cfg.Profile.StoreFakeIP,
+		SmartCollectorSize: cfg.Profile.SmartCollectorSize,
 	}, nil
 }
 

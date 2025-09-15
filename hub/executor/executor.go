@@ -25,6 +25,7 @@ import (
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/resource"
+	"github.com/metacubex/mihomo/component/smart/lightgbm"
 	"github.com/metacubex/mihomo/component/sniffer"
 	tlsC "github.com/metacubex/mihomo/component/tls"
 	"github.com/metacubex/mihomo/component/trie"
@@ -98,6 +99,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
+	closeSmartGroups()
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
@@ -116,6 +118,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.Providers)
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
+	initializeSmartGroups(cfg.Proxies)
 	runtime.GC()
 	tunnel.OnRunning()
 	updateUpdater(cfg)
@@ -180,6 +183,9 @@ func GetGeneral() *config.General {
 		KeepAliveInterval:       int(keepalive.KeepAliveInterval() / time.Second),
 		KeepAliveIdle:           int(keepalive.KeepAliveIdle() / time.Second),
 		DisableKeepAlive:        keepalive.DisableKeepAlive(),
+		LgbmAutoUpdate:          updater.LgbmAutoUpdate(),
+		LgbmUpdateInterval:      updater.LgbmUpdateInterval(),
+		LgbmUrl:                 updater.LgbmUrl(),
 	}
 
 	return general
@@ -366,6 +372,10 @@ func updateUpdater(cfg *config.Config) {
 	updater.SetGeoAutoUpdate(general.GeoAutoUpdate)
 	updater.SetGeoUpdateInterval(general.GeoUpdateInterval)
 
+	updater.SetLgbmAutoUpdate(general.LgbmAutoUpdate)
+	updater.SetLgbmUpdateInterval(general.LgbmUpdateInterval)
+	updater.SetLgbmUrl(general.LgbmUrl)
+
 	controller := cfg.Controller
 	updater.DefaultUiUpdater = updater.NewUiUpdater(controller.ExternalUI, controller.ExternalUIURL, controller.ExternalUIName)
 	updater.DefaultUiUpdater.AutoDownloadUI()
@@ -430,6 +440,8 @@ func updateUsers(users []auth.AuthUser) {
 
 func updateProfile(cfg *config.Config) {
 	profileCfg := cfg.Profile
+
+	lightgbm.SetSmartCollectorSize(profileCfg.SmartCollectorSize)
 
 	profile.StoreSelected.Store(profileCfg.StoreSelected)
 	if profileCfg.StoreSelected {
@@ -526,10 +538,34 @@ func updateIPTables(cfg *config.Config) {
 	log.Infoln("[IPTABLES] Setting iptables completed")
 }
 
+func initializeSmartGroups(proxies map[string]C.Proxy) {
+	for _, proxy := range proxies {
+		if proxy.Type() == C.Smart {
+			if smart, ok := proxy.Adapter().(*outboundgroup.Smart); ok {
+				log.Infoln("[Smart] Initializing Smart Group: %s", proxy.Name())
+				smart.InitializeCache()
+			}
+		}
+	}
+}
+
+func closeSmartGroups() {
+	for _, proxy := range tunnel.Proxies() {
+		if proxy.Type() == C.Smart {
+			adapter := proxy.Adapter()
+			if smart, ok := adapter.(*outboundgroup.Smart); ok {
+				smart.Close()
+			}
+		}
+	}
+}
+
 func Shutdown() {
 	listener.Cleanup()
 	tproxy.CleanupTProxyIPTables()
 	resolver.StoreFakePoolState()
+
+	closeSmartGroups()
 
 	log.Warnln("Mihomo shutting down")
 }
